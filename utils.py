@@ -44,45 +44,31 @@ def extract_order_value(note_text):
 
 def has_comments(item):
     """
-    Check if an item has any type of comments.
-    Now checks for Developer Comment, regular Comment, and CoT Comment.
+    Check if an item has comments from document matching.
     """
     note_text = item.get('note_text', '')
     if not note_text:
         return False
 
-    # Check for any type of comment
-    return bool(re.search(r'(Developer Comment:|Comment:|CoT Comment:)', note_text))
+    # Check only for Comment: which is added during document matching
+    return 'Comment:' in note_text
 
 
 def get_comment_text(item):
     """
-    Extract comment text from an item, now supporting multiple comment types.
-    Returns a combined string of all comment types.
+    Extract comment text from an item.
+    Returns only comments added during document matching.
     """
     note_text = item.get('note_text', '')
     if not note_text:
         return ""
 
-    comments = []
-
-    # Extract Developer Comment if present
-    dev_match = re.search(r'Developer Comment:(.+?)(?=\n|$)', note_text, re.DOTALL)
-    if dev_match:
-        comments.append(f"Developer Comment: {dev_match.group(1).strip()}")
-
-    # Extract regular Comment if present
-    comment_match = re.search(r'Comment:(?!.*CoT)(.+?)(?=\n|$)', note_text, re.DOTALL)
+    # Extract only regular Comment (added during document matching)
+    comment_match = re.search(r'Comment:(.+?)(?=\n|$)', note_text, re.DOTALL)
     if comment_match:
-        comments.append(f"Comment: {comment_match.group(1).strip()}")
+        return f"Comment: {comment_match.group(1).strip()}"
 
-    # Extract CoT Comment if present
-    cot_match = re.search(r'CoT Comment:(.+?)(?=\n|$)', note_text, re.DOTALL)
-    if cot_match:
-        comments.append(f"CoT Comment: {cot_match.group(1).strip()}")
-
-    # Join all comment types with line breaks
-    return "\n".join(comments)
+    return ""
 
 def natural_sort_key(k):
     """
