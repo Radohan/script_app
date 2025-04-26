@@ -7,7 +7,8 @@ import webbrowser
 from PyQt5.QtWidgets import (QMainWindow, QVBoxLayout, QWidget, QFileDialog,
                            QTableWidgetItem, QMessageBox, QStatusBar, QHeaderView,
                            QPushButton, QAction, QFrame, QHBoxLayout, QToolBar,
-                           QMenu, QToolButton, QSizePolicy, QProgressBar, QLabel)
+                           QMenu, QToolButton, QSizePolicy, QProgressBar, QLabel,
+                           QApplication)
 from PyQt5.QtCore import Qt, QTimer, QSize, QPoint
 from PyQt5.QtGui import QFont, QColor, QPainter
 
@@ -19,8 +20,11 @@ from utils.utils import (extract_main_key, extract_line_number, has_comments,
 from utils.xml_parser import XMLParser
 from utils.document_parser import DocumentParser
 from utils.FileProcessingWorker import FileProcessingWorker
-
-
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.comments import Comment
+import pandas
 
 class MXLIFFParser(QMainWindow):
     def __init__(self):
@@ -38,6 +42,7 @@ class MXLIFFParser(QMainWindow):
         # Define fixed column configuration in the exact order shown
         self.default_columns = [
             'Key',
+            'Info',
             'Speaker',
             'Source Text',
             'Target Text',
@@ -134,6 +139,48 @@ class MXLIFFParser(QMainWindow):
         # Start worker
         self.worker.start()
 
+    def create_info_icon(self, row, column, tooltip=""):
+        """Create an info icon in the specified cell with optional tooltip."""
+        from PyQt5.QtGui import QIcon, QPixmap
+        from PyQt5.QtCore import QSize, Qt
+
+        # Create a label widget to hold the icon
+        from PyQt5.QtWidgets import QLabel
+
+        icon_label = QLabel()
+        icon_label.setAlignment(Qt.AlignCenter)
+
+        # Create the icon programmatically (since we can't include external images)
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.transparent)
+
+        # Draw the info icon
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw circle
+        painter.setPen(Qt.black)
+        painter.setBrush(Qt.white)
+        painter.drawEllipse(2, 2, 20, 20)
+
+        # Draw 'i' letter
+        font = QFont("Arial", 14, QFont.Bold)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "i")
+        painter.end()
+
+        # Set the icon
+        icon_label.setPixmap(pixmap)
+
+        # Set tooltip if provided
+        if tooltip:
+            icon_label.setToolTip(tooltip)
+
+        # Add the label to the table
+        self.table.setCellWidget(row, column, icon_label)
+
+        return icon_label
+
     def _update_progress(self, value, message):
         """Update progress bar and status message."""
         self.progress_bar.setValue(value)
@@ -143,43 +190,29 @@ class MXLIFFParser(QMainWindow):
         QApplication.processEvents()
 
     def _on_xml_parsed(self, result):
-        """Handle completed XML parsing."""
-        # Extract results
-        processed_data = result.get('processed_data', [])
-        original_xml_content = result.get('original_xml_content', '')
-        file_path = result.get('file_path', '')
-
-        # Store data
-        self.original_xml_content = original_xml_content
-        self.current_file_path = file_path
-        self.processed_data = processed_data
-
-        # Display results
-        self.display_results(processed_data)
-
-        # Update UI
-        self.progress_bar.setVisible(False)
-
-        # Update table stats
-        self.table_stats.setText(f"{self.table.rowCount()} entries")
-
-        # Check for missing lines
-        missing_lines = self.check_missing_lines()
-
-        # Show success message with stats
-        success_message = f"File processed successfully. {self.table.rowCount()} entries loaded."
-        if missing_lines:
-            # If there are missing lines, modify the success message
-            total_missing = sum(len(group['missing_lines']) for group in missing_lines)
-            success_message += f" (Missing lines: {total_missing})"
-
-        self.statusBar.showMessage(success_message, 5000)
+        # Code processing the result...
 
         # Enable export controls now that we have a file loaded
         if hasattr(self, 'export_button'):
             self.export_button.setEnabled(True)
+            self.log("MXLIFF export button enabled")
         if hasattr(self, 'export_action'):
             self.export_action.setEnabled(True)
+
+        # Enable Excel export controls - add debug logging
+        if hasattr(self, 'export_excel_button'):
+            self.export_excel_button.setEnabled(True)
+            self.log("Excel export button enabled")
+        if hasattr(self, 'export_excel_action'):
+            self.export_excel_action.setEnabled(True)
+            self.log("Excel export action enabled")
+
+        # Also enable the button in the regular file loading method
+        if hasattr(self, '_process_file'):
+            # After successful loading
+            if hasattr(self, 'export_excel_button'):
+                self.export_excel_button.setEnabled(True)
+                self.log("Excel export button enabled in _process_file")
 
     def _on_worker_error(self, error_message):
         """Handle worker thread errors."""
@@ -320,6 +353,267 @@ class MXLIFFParser(QMainWindow):
 
         # Start worker
         self.worker.start()
+
+    def export_to_excel(self):
+        """Export the current table data to Excel with formatting preserved."""
+        try:
+            self.log("Export to Excel button clicked!")
+
+            # Force the button to show as enabled in case it's not
+            if hasattr(self, 'export_excel_button'):
+                self.export_excel_button.setEnabled(True)
+                self.export_excel_button.repaint()  # Force UI update
+
+            if not hasattr(self, 'processed_data') or not self.processed_data:
+                self.log("No data to export")
+                QMessageBox.warning(
+                    self,
+                    "No Data to Export",
+                    "Please open an MXLIFF file first before exporting to Excel."
+                )
+                return
+
+            # Choose where to save the Excel file
+            self.log("Opening file dialog")
+            options = QFileDialog.Options()
+            default_name = os.path.splitext(os.path.basename(self.current_file_path))[0] + ".xlsx"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export to Excel",
+                default_name,
+                "Excel Files (*.xlsx);;All Files (*)",
+                options=options
+            )
+
+            if not save_path:
+                self.log("User cancelled file dialog")
+                return  # User cancelled
+
+            # Show progress
+            self.log(f"Starting export to {save_path}")
+            self.progress_bar.setVisible(True)
+            self.statusBar.showMessage("Exporting to Excel...")
+
+            # We'll export in a timer to allow UI to update
+            self.log("Setting up timer for _process_excel_export")
+            QTimer.singleShot(100, lambda: self._process_excel_export(save_path))
+
+        except Exception as e:
+            self.log(f"Error in export_to_excel: {str(e)}")
+            self.log(traceback.format_exc())
+            self.progress_bar.setVisible(False)
+            error_msg = f"Error preparing Excel export: {str(e)}"
+            self.statusBar.showMessage(error_msg, 5000)
+
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                error_msg
+            )
+
+    def _process_excel_export(self, save_path):
+        """Process the Excel export after a short delay to allow UI to update."""
+        try:
+            # Create a new workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "MXLIFF Data"
+
+            # Add an additional column for notes/comments
+            notes_column_name = "Additional Notes"
+
+            # Define column headers based on the current column order
+            headers = self.current_columns.copy()
+            headers.append(notes_column_name)  # Add notes column
+
+            for i, header in enumerate(headers, 1):
+                ws.cell(row=1, column=i, value=header)
+                ws.cell(row=1, column=i).font = Font(bold=True)
+                # Add a light gray background to header row
+                ws.cell(row=1, column=i).fill = PatternFill(start_color="D3D3D3", fill_type="solid")
+
+            # Get theme colors for formatting
+            group_header_color = self._excel_color_from_qcolor(QColor(self.current_theme['group_header']))
+            menu_label_color = self._excel_color_from_qcolor(QColor(self.current_theme['menu_label']))
+            female_key_color = self._excel_color_from_qcolor(QColor(self.current_theme['female_key']))
+            diff_text_color = self._excel_color_from_qcolor(QColor(self.current_theme.get('diff_text', '#FF0000')))
+
+            # Track current Excel row
+            excel_row = 2  # Start after the header row
+
+            # Process each row in the table and add to Excel
+            for row in range(self.table.rowCount()):
+                # Check if this is a header row
+                first_cell = self.table.item(row, 0)
+                if not first_cell:
+                    continue  # Skip empty rows
+
+                # Check if this is a group header
+                is_header = False
+                header_data = first_cell.data(Qt.UserRole) if first_cell else None
+                if header_data and isinstance(header_data, dict) and header_data.get('is_header'):
+                    is_header = True
+                    # Add group header as a merged cell
+                    header_text = first_cell.text()
+                    ws.cell(row=excel_row, column=1, value=header_text)
+                    # Apply header formatting
+                    header_cell = ws.cell(row=excel_row, column=1)
+                    header_cell.font = Font(bold=True)
+                    header_cell.fill = PatternFill(start_color=group_header_color,
+                                                   fill_type="solid")
+                    # Merge cells across all columns
+                    ws.merge_cells(start_row=excel_row, start_column=1, end_row=excel_row, end_column=len(headers))
+                    excel_row += 1
+                    continue
+
+                # Check if this is a scene info row
+                if first_cell and 'Scene:' in first_cell.text() and self.table.columnSpan(row, 0) > 1:
+                    scene_text = first_cell.text()
+                    ws.cell(row=excel_row, column=1, value=scene_text)
+                    # Apply scene info formatting
+                    scene_cell = ws.cell(row=excel_row, column=1)
+                    scene_cell.font = Font(italic=True)
+                    lighter_color = self._lighten_excel_color(group_header_color)
+                    scene_cell.fill = PatternFill(start_color=lighter_color, fill_type="solid")
+                    # Merge cells across all columns
+                    ws.merge_cells(start_row=excel_row, start_column=1, end_row=excel_row, end_column=len(headers))
+                    excel_row += 1
+                    continue
+
+                # Check if this is a missing line row
+                if first_cell and '[MISSING LINE' in first_cell.text() and self.table.columnSpan(row, 0) > 1:
+                    missing_text = first_cell.text()
+                    ws.cell(row=excel_row, column=1, value=missing_text)
+                    # Apply missing line formatting
+                    missing_cell = ws.cell(row=excel_row, column=1)
+                    missing_cell.font = Font(bold=True, color="AA0000")
+                    missing_cell.fill = PatternFill(start_color="FFCCCC", fill_type="solid")
+                    missing_cell.alignment = Alignment(horizontal='center', vertical='center')
+                    # Merge cells across all columns
+                    ws.merge_cells(start_row=excel_row, start_column=1, end_row=excel_row, end_column=len(headers))
+                    excel_row += 1
+                    continue
+
+                # Regular data row
+                cell_colors = {}
+
+                # Get key to determine row type
+                key_col = self.column_map.get('Key', 0)
+                key_item = self.table.item(row, key_col)
+                key_text = key_item.text() if key_item else ""
+
+                # Determine row background color
+                bg_color = None
+                if key_item:
+                    if 'MenuLabel' in key_text:
+                        bg_color = menu_label_color
+                    elif key_text.endswith('.F'):
+                        bg_color = female_key_color
+
+                # Prepare to collect notes/additional information
+                row_notes = []
+
+                # Process each column
+                for col_name, col_index in self.column_map.items():
+                    cell = self.table.item(row, col_index)
+                    if not cell:
+                        continue
+
+                    excel_col = self.current_columns.index(col_name) + 1  # Excel is 1-indexed
+                    cell_value = cell.text()
+
+                    # Create Excel cell
+                    excel_cell = ws.cell(row=excel_row, column=excel_col, value=cell_value)
+
+                    # Apply basic formatting
+                    excel_cell.alignment = Alignment(wrap_text=True, vertical='top')
+
+                    # Apply background color if needed
+                    if bg_color:
+                        excel_cell.fill = PatternFill(start_color=bg_color, fill_type="solid")
+
+                    # Apply text color for diff highlighting
+                    if cell.foreground().color().name() == QColor(
+                            self.current_theme.get('diff_text', '#FF0000')).name():
+                        excel_cell.font = Font(color=diff_text_color)
+
+                    # Bold for edited cells
+                    if cell.font().bold():
+                        excel_cell.font = Font(bold=True)
+
+                    # Collect tooltip information
+                    tooltip = cell.toolTip()
+                    if tooltip:
+                        row_notes.append(f"{col_name}: {tooltip}")
+
+                # Add collected notes to the last column
+                notes_col = len(headers)
+                ws.cell(row=excel_row, column=notes_col, value='; '.join(row_notes))
+
+                excel_row += 1
+
+            # Auto-adjust column widths
+            for col_idx, col_name in enumerate(headers, 1):
+                # Set column width based on content
+                if col_name in ['Source Text', 'Target Text', 'Additional Notes']:
+                    # Make text columns wider
+                    ws.column_dimensions[get_column_letter(col_idx)].width = 60
+                elif col_name == 'Char Info':
+                    # Make character info column narrower
+                    ws.column_dimensions[get_column_letter(col_idx)].width = 15
+                else:
+                    # Default width for other columns
+                    ws.column_dimensions[get_column_letter(col_idx)].width = 25
+
+            # Save the workbook
+            wb.save(save_path)
+
+            # Hide progress bar and show success message
+            self.progress_bar.setVisible(False)
+            self.statusBar.showMessage(f"Excel file exported successfully to {save_path}", 5000)
+
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"Excel file was successfully exported to:\n{save_path}\n\n"
+                f"Total rows: {excel_row - 1}\n"
+                f"Formatting and additional information have been preserved in the 'Additional Notes' column."
+            )
+
+        except Exception as e:
+            # Log and show error
+            self.log(f"Excel export error: {str(e)}")
+            import traceback
+            self.log(traceback.format_exc())
+
+            self.progress_bar.setVisible(False)
+            self.statusBar.showMessage(f"Error exporting to Excel: {str(e)}", 5000)
+
+            QMessageBox.critical(
+                self,
+                "Excel Export Error",
+                f"An error occurred while exporting to Excel:\n\n{str(e)}"
+            )
+
+    def _excel_color_from_qcolor(self, qcolor):
+        """Convert a QColor to Excel color string format (RRGGBB)."""
+        return f"{qcolor.red():02X}{qcolor.green():02X}{qcolor.blue():02X}"
+
+    def _lighten_excel_color(self, hex_color, factor=0.2):
+        """Lighten a hex color by a factor (0.0-1.0)."""
+        # Convert hex to RGB
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+
+        # Lighten
+        r = min(255, int(r + (255 - r) * factor))
+        g = min(255, int(g + (255 - g) * factor))
+        b = min(255, int(b + (255 - b) * factor))
+
+        # Convert back to hex
+        return f"{r:02X}{g:02X}{b:02X}"
 
     def _on_export_completed(self, result):
         """Handle completed export."""
@@ -551,6 +845,7 @@ class MXLIFFParser(QMainWindow):
 
                 self.statusBar.showMessage("Operation cancelled", 3000)
 
+
     def load_fonts(self):
         """Load custom fonts for the application."""
         # These fonts are typically available on most systems
@@ -578,7 +873,12 @@ class MXLIFFParser(QMainWindow):
         # Create UI components helper
         self.ui_components = UIComponents(self, self.fonts, self.current_columns)
 
-        # Create application icon
+        if hasattr(self, 'export_excel_button'):
+            self.log("Connecting Excel export button in initUI")
+            self.export_excel_button.clicked.disconnect()  # Disconnect any existing connections
+            self.export_excel_button.clicked.connect(self.export_to_excel)
+
+            # Create application icon
         app_icon = self.ui_components.create_app_icon()
         self.setWindowIcon(app_icon)
 
@@ -635,18 +935,21 @@ class MXLIFFParser(QMainWindow):
         open_action.setStatusTip("Open an MXLIFF file")
         self.toolbar.addAction(open_action)
 
-        # Export file action
-        self.export_action = QAction("Export", self)
+        # Export MXLIFF file action
+        self.export_action = QAction("Export MXLIFF", self)
         self.export_action.triggered.connect(self.export_file)
         self.export_action.setStatusTip("Export the edited MXLIFF file")
         self.export_action.setEnabled(False)  # Disabled until a file is loaded
         self.toolbar.addAction(self.export_action)
 
-        # Add Upload Document action
-        upload_doc_action = QAction("Upload Document", self)
-        upload_doc_action.triggered.connect(self.upload_document)
-        upload_doc_action.setStatusTip("Upload a Word or PDF document to analyze")
-        self.toolbar.addAction(upload_doc_action)
+        # NEW: Add Excel export action
+        self.export_excel_action = QAction("Export to Excel", self)
+        self.export_excel_action.triggered.connect(self.export_to_excel)
+        self.export_excel_action.setStatusTip("Export the data to Excel with formatting")
+        self.export_excel_action.setEnabled(False)  # Disabled until a file is loaded
+        self.toolbar.addAction(self.export_excel_action)
+
+
 
         # Script Resources dropdown
         resources_menu = QMenu("Script Resources", self)
@@ -699,7 +1002,7 @@ class MXLIFFParser(QMainWindow):
         top_row.addWidget(title_label)
 
         # Version label (right-aligned)
-        version_label = QLabel("v1.6")  # Updated version to reflect the document upload feature
+        version_label = QLabel("v1.7")  # Updated version to reflect the Excel export feature
         version_label.setObjectName("versionLabel")
         version_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         top_row.addWidget(version_label)
@@ -720,22 +1023,32 @@ class MXLIFFParser(QMainWindow):
         self.open_button = QPushButton('Open MXLIFF File')
         self.open_button.setObjectName("primaryButton")
         self.open_button.clicked.connect(self.open_file)
-        self.open_button.setFixedSize(180, 40)
+        self.open_button.setFixedSize(160, 40)  # Slightly smaller to fit all buttons
         buttons_layout.addWidget(self.open_button)
 
         # Export file button
-        self.export_button = QPushButton('Export MXLIFF File')
+        self.export_button = QPushButton('Export MXLIFF')
         self.export_button.setObjectName("primaryButton")
         self.export_button.clicked.connect(self.export_file)
-        self.export_button.setFixedSize(180, 40)
+        self.export_button.setFixedSize(160, 40)
         self.export_button.setEnabled(False)  # Disabled until a file is loaded
         buttons_layout.addWidget(self.export_button)
+
+        self.export_excel_button = QPushButton('Export to Excel')
+        self.export_excel_button.setObjectName("primaryButton")  # Ensure this matches other buttons
+        self.export_excel_button.setCursor(Qt.PointingHandCursor)  # Add cursor change on hover
+        self.export_excel_button.clicked.connect(self.export_to_excel)
+        self.export_excel_button.setFixedSize(160, 40)
+        self.export_excel_button.setEnabled(False)
+        # Apply the same style explicitly to ensure hover works
+        self.export_excel_button.setStyleSheet("")  # Clear any custom styles that might be interfering
+        buttons_layout.addWidget(self.export_excel_button)
 
         # Upload Document button
         self.upload_doc_button = QPushButton('Upload Document')
         self.upload_doc_button.setObjectName("primaryButton")
         self.upload_doc_button.clicked.connect(self.upload_document)
-        self.upload_doc_button.setFixedSize(180, 40)
+        self.upload_doc_button.setFixedSize(160, 40)
         buttons_layout.addWidget(self.upload_doc_button)
 
         # Add buttons container to middle row
@@ -770,6 +1083,7 @@ class MXLIFFParser(QMainWindow):
         # Map of columns to their preferred width
         width_map = {
             'Key': 200,
+            'Info': 40,
             'Speaker': 150,
             'Source Text': QHeaderView.Stretch,
             'Target Text': QHeaderView.Stretch,
@@ -946,6 +1260,14 @@ class MXLIFFParser(QMainWindow):
             if hasattr(self, 'export_action'):
                 self.export_action.setEnabled(True)
 
+        # Enable Excel export controls as well
+            if hasattr(self, 'export_excel_button'):
+                self.export_excel_button.setEnabled(True)
+                # Optional: Add logging to confirm button is enabled
+                self.log("Excel export button enabled")
+            if hasattr(self, 'export_excel_action'):
+                self.export_excel_action.setEnabled(True)
+
         except Exception as e:
             self.progress_bar.setVisible(False)
             error_msg = f"Error: {str(e)}"
@@ -1002,7 +1324,7 @@ class MXLIFFParser(QMainWindow):
         default_name = "edited_" + os.path.basename(self.current_file_path)
         save_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export MXLIFF File",
+            "Export to MXLIFF File",
             default_name,
             "MXLIFF Files (*.mxliff *.xml);;All Files (*)",
             options=options
@@ -1113,7 +1435,10 @@ class MXLIFFParser(QMainWindow):
         QTimer.singleShot(100, lambda: self._process_document())
 
     def _process_document(self):
-        """Modified document processing method with enhanced debugging"""
+        """
+        Modified document processing method with enhanced debugging.
+        Ensures Info column icons are updated when document matches are found.
+        """
         try:
             # Parse the document
             success = self.document_parser.parse_document()
@@ -1165,39 +1490,47 @@ class MXLIFFParser(QMainWindow):
                 elif not key.endswith('.F'):
                     matched_keys.append(f"{key}.F")
 
-                # Update all matching keys
-                for match_key in matched_keys:
-                    # Find the item in processed data
-                    for data in self.processed_data:
-                        if not data.get('is_header', True) and 'item' in data:
-                            item = data['item']
-                            if item.get('key') == match_key:
-                                # Add comment to note_text field
-                                note_text = item.get('note_text', '')
+            # Update all matching keys
+            for match_key in matched_keys:
+                # Find the item in processed data
+                for data in self.processed_data:
+                    if not data.get('is_header', True) and 'item' in data:
+                        item = data['item']
+                        if item.get('key') == match_key:
+                            # Add comment to note_text field
+                            note_text = item.get('note_text', '')
 
-                                # Check if there's already a comment
-                                if 'Comment:' in note_text:
-                                    # Replace existing comment
-                                    note_text = re.sub(
-                                        r'Comment:.*?(?=\n|$)',
-                                        f'Comment: {comment}',
-                                        note_text
-                                    )
+                            # Check if there's already a comment
+                            if 'Comment:' in note_text:
+                                # Replace existing comment
+                                note_text = re.sub(
+                                    r'Comment:.*?(?=\n|$)',
+                                    f'Comment: {comment}',
+                                    note_text
+                                )
+                            else:
+                                # Add new comment
+                                if note_text:
+                                    note_text += f"\nComment: {comment}"
                                 else:
-                                    # Add new comment
-                                    if note_text:
-                                        note_text += f"\nComment: {comment}"
-                                    else:
-                                        note_text = f"Comment: {comment}"
+                                    note_text = f"Comment: {comment}"
 
-                                # Update the note_text
-                                item['note_text'] = note_text
-                                comment_updates += 1
-                                updated_keys.add(match_key)
-                                self.log(f"Updated key: {match_key} with comment")
-                                break
+                            # Update the note_text
+                            item['note_text'] = note_text
+                            item['has_document_match'] = True  # Add this line here
+                            comment_updates += 1
+                            updated_keys.add(match_key)
+                            self.log(f"Updated key: {match_key} with comment")
+                            break
 
-            # Efficiently update comments in the table
+            # Get the Info column index for verification
+            info_col = self.column_map.get('Info', 1)
+            if info_col >= 0:
+                self.log(f"Info column found at index {info_col}, will update with icons")
+            else:
+                self.log("Warning: Info column not found in column map!")
+
+            # Efficiently update comments and info icons in the table
             self.update_comments_efficiently(updated_keys)
 
             # Hide progress bar and show success message
@@ -1215,7 +1548,8 @@ class MXLIFFParser(QMainWindow):
                     f"Successfully processed the document:\n\n"
                     f"- Found {len(conversation_tables)} tables with conversation data\n"
                     f"- Matched {match_results['matches']} entries with MXLIFF content\n"
-                    f"- Updated {comment_updates} entries with comments"
+                    f"- Updated {comment_updates} entries with comments\n"
+                    f"- Added info icons to {len(updated_keys)} matched entries"  # Added this line
                 )
             else:
                 self.statusBar.showMessage("Document processed: No matching entries found.", 5000)
@@ -1242,6 +1576,7 @@ class MXLIFFParser(QMainWindow):
     def update_comments_efficiently(self, updated_keys):
         """
         Efficiently update comments for specific keys without redrawing entire table.
+        Now also adds info icons to the Info column when matching results are found.
 
         Args:
             updated_keys (set): Set of keys that have been updated with new comments
@@ -1251,7 +1586,8 @@ class MXLIFFParser(QMainWindow):
 
         # Columns we care about
         key_col = self.column_map.get('Key', 0)
-        source_col = self.column_map.get('Source Text', 2)
+        info_col = self.column_map.get('Info', 1)  # Get the Info column index
+        source_col = self.column_map.get('Source Text', 2)  # Adjust index if needed due to new Info column
 
         # Iterate through table rows
         for row in range(self.table.rowCount()):
@@ -1284,9 +1620,23 @@ class MXLIFFParser(QMainWindow):
 
                     # Update tooltip for all cells in this row
                     for col in range(self.table.columnCount()):
-                        cell = self.table.item(row, col)
-                        if cell:
-                            cell.setToolTip(tooltip_text)
+                        if col != info_col:  # Skip info column as we'll handle it separately
+                            cell = self.table.item(row, col)
+                            if cell:
+                                cell.setToolTip(tooltip_text)
+
+                    # Update the Info column with info icon
+                    if info_col >= 0:
+                        # Remove any existing cell widget
+                        existing_widget = self.table.cellWidget(row, info_col)
+                        if existing_widget:
+                            self.table.removeCellWidget(row, info_col)
+
+                        # Create and set the info icon with tooltip
+                        self.create_info_icon(row, info_col, tooltip_text)
+
+                        # Log that we've added an icon (for debugging)
+                        self.log(f"Added info icon for key: {key_text}")
 
                     # Update the source text column with comment icon if needed
                     if source_col >= 0:
@@ -2134,78 +2484,93 @@ class MXLIFFParser(QMainWindow):
                 has_comment = has_comments(item)
                 comment_text = get_comment_text(item) if has_comment else ""
 
-                # Add comment icon to source text if has comments
-                comment_icon = "💬 " if has_comment else ""
+                # Build source text with comment icon if needed
+                source_text = item.get('source_text', '')
+                if has_comment and not source_text.startswith('💬 '):
+                    source_text = f"💬 {source_text}"
+
+                # Prepare tooltip text
+                tooltip_text = item.get('note_text', '')
+                if has_comment:
+                    tooltip_text = f"{comment_text}\n\n{tooltip_text}" if tooltip_text else comment_text
 
                 # Inside the display_results method, modify the part that creates row data:
                 row_data = {
                     'Key': item.get('key', ''),
+                    'Info': '',  # Placeholder for Info column, we'll handle it separately
                     'Speaker': item.get('speaker', ''),
-                    'Source Text': comment_icon + item.get('source_text', ''),  # Add comment icon here
-                    'Target Text': item.get('target_text', ''),  # Clean text without comment icon
+                    'Source Text': source_text,
+                    'Target Text': item.get('target_text', ''),
                     'Char Info': '',  # We'll set this separately
                     'Speaker and Target': '\n'.join(speaker_info),
                     'Player Info': '\n'.join(player_info)
                 }
 
-                # Then when processing each column:
+                # Add data to table according to current column order
                 for col_name, col_index in self.column_map.items():
-                    # Special handling for Char Info column
-                    # Inside display_results method where you're setting up columns
+                    if col_name == 'Char Info':
+                        # Calculate character info for the Char Info column
+                        target_text = item.get('target_text', '')
+                        source_text = item.get('source_text', '')
 
-                    # Add data to table according to current column order
-                    for col_name, col_index in self.column_map.items():
-                        if col_name == 'Char Info':
-                            # Calculate character info for the Char Info column
-                            target_text = item.get('target_text', '')
-                            source_text = item.get('source_text', '')
+                        source_char_count = len(source_text)
+                        target_char_count = len(target_text)
 
-                            source_char_count = len(source_text)
-                            target_char_count = len(target_text)
+                        # Calculate percentage difference
+                        percentage_diff = 0
+                        if source_char_count > 0:
+                            percentage_diff = ((target_char_count - source_char_count) / source_char_count) * 100
 
-                            # Calculate percentage difference
-                            percentage_diff = 0
-                            if source_char_count > 0:
-                                percentage_diff = ((target_char_count - source_char_count) / source_char_count) * 100
-
-                            # Prepare char info text
-                            if source_char_count == target_char_count:
-                                char_info = "Equal"
+                        # Prepare char info text
+                        if source_char_count == target_char_count:
+                            char_info = "Equal"
+                        else:
+                            if percentage_diff > 0:
+                                char_info = f"+{int(percentage_diff)}%"
                             else:
-                                if percentage_diff > 0:
-                                    char_info = f"+{int(percentage_diff)}%"
-                                else:
-                                    char_info = f"{int(percentage_diff)}%"
+                                char_info = f"{int(percentage_diff)}%"
 
-                            # Create table item with char info
-                            table_item = QTableWidgetItem(char_info)
+                        # Create table item with char info
+                        table_item = QTableWidgetItem(char_info)
 
-                            # Make it non-editable
+                        # Make it non-editable
+                        table_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+                        # Color code if needed
+                        if abs(percentage_diff) > 20:
+                            table_item.setForeground(QColor(255, 0, 0))
+                        elif percentage_diff > 0:
+                            table_item.setForeground(QColor(0, 128, 0))  # Green for positive expansions
+                        elif percentage_diff < 0:
+                            table_item.setForeground(QColor(0, 0, 255))  # Blue for contractions
+
+                    elif col_name == 'Info':
+                        # Only show info icons when a document has been uploaded and matches found
+                        if item.get('has_document_match', False):
+                            # Create info icon with tooltip
+                            self.create_info_icon(row_index, col_index, tooltip_text)
+                            continue
+                        else:
+                            # Create empty cell
+                            table_item = QTableWidgetItem("")
                             table_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
-                            # Color code if needed
-                            if abs(percentage_diff) > 20:
-                                table_item.setForeground(QColor(255, 0, 0))
-                            elif percentage_diff > 0:
-                                table_item.setForeground(QColor(0, 128, 0))  # Green for positive expansions
-                            elif percentage_diff < 0:
-                                table_item.setForeground(QColor(0, 0, 255))  # Blue for contractions
+                    else:
+                        # Regular column processing
+                        value = row_data.get(col_name, '')
+                        table_item = QTableWidgetItem(value)
+
+                        if col_name == 'Target Text':
+                            # Make Target Text column editable
+                            table_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                            table_item.setData(Qt.UserRole, item.get('target_text', ''))
                         else:
-                            # Regular column processing
-                            value = row_data.get(col_name, '')
-                            table_item = QTableWidgetItem(value)
+                            # Other columns remain non-editable
+                            table_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
-                            if col_name == 'Target Text':
-                                # Make Target Text column editable
-                                table_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
-                                table_item.setData(Qt.UserRole, item.get('target_text', ''))
-                            else:
-                                # Other columns remain non-editable
-                                table_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-
-                        # Set the item in the table
-                        self.table.setItem(row_index, col_index, table_item)
-                        table_item.setFont(self.normal_font)
+                    # Set the item in the table
+                    self.table.setItem(row_index, col_index, table_item)
+                    table_item.setFont(self.normal_font)
 
                 # Set background color based on conditions
                 bg_color = None
@@ -2224,14 +2589,11 @@ class MXLIFFParser(QMainWindow):
                             self.table.item(row_index, col).setBackground(bg_color)
 
                 # Add tooltip with full note text and highlight comment if present
-                if item.get('note_text'):
-                    tooltip_text = item.get('note_text')
-                    if has_comment:
-                        tooltip_text = f"{comment_text}\n\n{tooltip_text}"
-
+                if tooltip_text:
                     for col in range(self.table.columnCount()):
-                        if self.table.item(row_index, col):
-                            self.table.item(row_index, col).setToolTip(tooltip_text)
+                        if col != self.column_map.get('Info', 1):  # Skip Info column as it already has tooltip
+                            if self.table.item(row_index, col):
+                                self.table.item(row_index, col).setToolTip(tooltip_text)
 
                 # IMPORTANT: Force a minimum row height for data row
                 self.table.setRowHeight(row_index, 30)
@@ -2252,36 +2614,6 @@ class MXLIFFParser(QMainWindow):
             self.table.cellChanged.connect(self.on_cell_changed)
         except:
             pass
-
-    def clean_up_comment_icons(self):
-        """Move comment icons from Char Info column to Source Text column."""
-        char_info_col = self.column_map.get('Char Info', 4)
-        source_col = self.column_map.get('Source Text', 2)
-
-        # Process all rows in the table
-        for row in range(self.table.rowCount()):
-            # Skip header rows
-            if row < self.table.rowCount() and self.table.item(row, 0):
-                header_data = self.table.item(row, 0).data(Qt.UserRole)
-                if header_data and header_data.get('is_header', False):
-                    continue
-
-            # Check if we have items in both columns
-            char_item = self.table.item(row, char_info_col) if char_info_col >= 0 else None
-            source_item = self.table.item(row, source_col) if source_col >= 0 else None
-
-            if char_item and source_item:
-                char_text = char_item.text()
-                source_text = source_item.text()
-
-                # If Char Info has comment icon
-                if char_text.endswith(' 💬'):
-                    # Remove it from Char Info
-                    char_item.setText(char_text.replace(' 💬', ''))
-
-                    # Add it to Source Text if not already there
-                    if not source_text.startswith('💬 '):
-                        source_item.setText('💬 ' + source_text)
 
     # Override the paintEvent for QTableWidget to show word count info
     def eventFilter(self, obj, event):
